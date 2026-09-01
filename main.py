@@ -1,23 +1,22 @@
-import os
 import time
+import os
 import requests
 from faker import Faker
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 
-app = Flask(__name__)
 fake = Faker("es_MX")
+app = Flask(__name__)
 
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
 
-PROXY_HOST = os.getenv("PROXY_HOST", "")
+PROXY_HOST = os.getenv("PROXY_HOST", "p.webshare.io:80")
 PROXY_USER = os.getenv("PROXY_USER", "")
 PROXY_PASS = os.getenv("PROXY_PASS", "")
 
-TEST_PASSWORD = os.getenv("TEST_PASSWORD", "TestPassword123!")
+PASSWORD = os.getenv("TEST_PASSWORD", "TestPassword123!")
 
-# Tu dominio
 EMAIL_DOMAIN = "mailgrid.shop"
 
 REGISTER_URL = (
@@ -30,102 +29,85 @@ LOGIN_URL = (
     "/api/auth"
 )
 
-TIMEOUT = 30
-
-
 # ============================================================
 # PROXY
 # ============================================================
 
-def get_proxies():
-    if not PROXY_HOST or not PROXY_USER or not PROXY_PASS:
-        return None
+if PROXY_USER and PROXY_PASS:
+    PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
 
-    proxy = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
-
-    return {
-        "http": proxy,
-        "https": proxy
+    proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL
     }
-
-
-PROXIES = get_proxies()
-
-
-# ============================================================
-# SESIÓN HTTP
-# ============================================================
-
-session = requests.Session()
-
-session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/128.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Content-Type": "application/json"
-})
+else:
+    PROXY_URL = ""
+    proxies = {}
 
 
 # ============================================================
-# GENERACIÓN DE DATOS
+# SESIÓN
+# ============================================================
+
+c = requests.Session()
+
+if proxies:
+    c.proxies.update(proxies)
+
+
+# ============================================================
+# HEADERS
+# ============================================================
+
+API_HEADERS = {
+    "User-Agent": "Dart/3.8 (dart:io)",
+    "Content-Type": "application/json; charset=utf-8"
+}
+
+
+# ============================================================
+# GENERAR CORREO
 # ============================================================
 
 def generar_email():
     """
-    Genera siempre un correo usando el dominio controlado
-    mailgrid.shop.
-
-    Ejemplo:
-        juan.lopez48321@mailgrid.shop
+    Genera un correo utilizando exclusivamente
+    el dominio mailgrid.shop.
     """
 
     nombre = fake.first_name().lower()
     apellido = fake.last_name().lower()
-    numero = fake.random_int(min=1000, max=999999)
+    numero = fake.random_int(
+        min=1000,
+        max=999999
+    )
 
     return f"{nombre}.{apellido}{numero}@{EMAIL_DOMAIN}"
 
 
-def generar_telefono():
-    """
-    Genera un teléfono de prueba con formato mexicano.
-    """
+# ============================================================
+# GENERAR DATOS DE REGISTRO
+# ============================================================
 
-    return "961" + str(
-        fake.random_number(digits=7, fix_len=True)
+def generar_datos_usuario():
+
+    nombre = fake.first_name()
+
+    apellidos = fake.last_name()
+
+    telefono = "".join(
+        str(fake.random_digit_not_null())
+        for _ in range(10)
     )
 
-
-def generar_usuario():
     email = generar_email()
 
     return {
-        "email": email,
-        "telefono": generar_telefono()
-    }
-
-
-# ============================================================
-# UTILIDADES
-# ============================================================
-
-def safe_response(response):
-    """
-    Devuelve información útil de la respuesta sin exponer
-    tokens o credenciales.
-    """
-
-    try:
-        body = response.text[:2000]
-    except Exception:
-        body = ""
-
-    return {
-        "status_code": response.status_code,
-        "response_body": body
+        "correoElectronico": email,
+        "nombre": nombre,
+        "apellidos": apellidos,
+        "telefono": telefono,
+        "contrasena": PASSWORD
     }
 
 
@@ -134,53 +116,48 @@ def safe_response(response):
 # ============================================================
 
 def registro_usuario():
-    datos = generar_usuario()
 
-    payload = {
-        "email": datos["email"],
-        "telefono": datos["telefono"],
-        "password": TEST_PASSWORD
-    }
+    payload = generar_datos_usuario()
 
     inicio = time.time()
 
     try:
-        response = session.post(
+
+        r = c.post(
             REGISTER_URL,
             json=payload,
-            proxies=PROXIES,
-            timeout=TIMEOUT
+            headers=API_HEADERS,
+            timeout=20
         )
 
-        elapsed = round(time.time() - inicio, 3)
+        elapsed = round(
+            time.time() - inicio,
+            3
+        )
 
         return {
-            "ok": response.ok,
+            "ok": r.status_code in (200, 201),
+            "status_code": r.status_code,
             "elapsed_seconds": elapsed,
-            "generated_data": {
-                "email": datos["email"],
-                "telefono": (
-                    datos["telefono"][:3]
-                    + "******"
-                    + datos["telefono"][-1:]
-                )
-            },
-            **safe_response(response)
+            "email": payload["correoElectronico"],
+            "telefono": (
+                payload["telefono"][:3]
+                + "******"
+                + payload["telefono"][-1:]
+            ),
+            "response_body": r.text[:2000]
         }
 
     except requests.RequestException as e:
 
         return {
             "ok": False,
-            "elapsed_seconds": round(time.time() - inicio, 3),
-            "generated_data": {
-                "email": datos["email"],
-                "telefono": (
-                    datos["telefono"][:3]
-                    + "******"
-                    + datos["telefono"][-1:]
-                )
-            },
+            "status_code": None,
+            "elapsed_seconds": round(
+                time.time() - inicio,
+                3
+            ),
+            "email": payload["correoElectronico"],
             "error": str(e)
         }
 
@@ -190,43 +167,53 @@ def registro_usuario():
 # ============================================================
 
 def login_usuario(email):
+
     payload = {
-        "email": email,
-        "password": TEST_PASSWORD
+        "correoElectronico": email,
+        "contrasena": PASSWORD
     }
 
     inicio = time.time()
 
     try:
-        response = session.post(
+
+        r = c.post(
             LOGIN_URL,
             json=payload,
-            proxies=PROXIES,
-            timeout=TIMEOUT
+            headers=API_HEADERS,
+            timeout=20
         )
 
-        elapsed = round(time.time() - inicio, 3)
+        elapsed = round(
+            time.time() - inicio,
+            3
+        )
 
         resultado = {
-            "ok": response.ok,
+            "ok": r.status_code in (200, 201),
+            "status_code": r.status_code,
             "elapsed_seconds": elapsed,
-            "status_code": response.status_code,
-            "response_body": response.text[:2000]
+            "response_body": r.text[:2000],
+            "token_detectado": False
         }
 
-        # No devolvemos tokens al cliente.
-        try:
-            data = response.json()
+        # No mostramos el token.
+        if r.status_code in (200, 201):
 
-            if isinstance(data, dict):
-                resultado["token_detectado"] = bool(
+            try:
+
+                data = r.json()
+
+                token = (
                     data.get("token")
-                    or data.get("access_token")
                     or data.get("accessToken")
+                    or (data.get("data") or {}).get("token")
                 )
 
-        except Exception:
-            resultado["token_detectado"] = False
+                resultado["token_detectado"] = bool(token)
+
+            except Exception:
+                pass
 
         return resultado
 
@@ -234,7 +221,11 @@ def login_usuario(email):
 
         return {
             "ok": False,
-            "elapsed_seconds": round(time.time() - inicio, 3),
+            "status_code": None,
+            "elapsed_seconds": round(
+                time.time() - inicio,
+                3
+            ),
             "error": str(e)
         }
 
@@ -268,7 +259,7 @@ def diagnostico_flujo():
 
     registro = registro_usuario()
 
-    if not registro.get("ok"):
+    if not registro["ok"]:
 
         trace.append({
             "stage": "register",
@@ -288,7 +279,7 @@ def diagnostico_flujo():
         **registro
     })
 
-    email = registro["generated_data"]["email"]
+    email = registro["email"]
 
     # --------------------------------------------------------
     # LOGIN
@@ -301,7 +292,7 @@ def diagnostico_flujo():
 
     login = login_usuario(email)
 
-    if not login.get("ok"):
+    if not login["ok"]:
 
         trace.append({
             "stage": "login",
@@ -318,9 +309,9 @@ def diagnostico_flujo():
     trace.append({
         "stage": "login",
         "status": "success",
-        "elapsed_seconds": login.get("elapsed_seconds"),
-        "status_code": login.get("status_code"),
-        "token_detectado": login.get("token_detectado")
+        "status_code": login["status_code"],
+        "elapsed_seconds": login["elapsed_seconds"],
+        "token_detectado": login["token_detectado"]
     })
 
     # --------------------------------------------------------
@@ -329,116 +320,260 @@ def diagnostico_flujo():
 
     return jsonify({
         "status": "success",
-        "message": "Registro y login completados correctamente",
+        "message": "Registro y login funcionan correctamente",
+        "email_domain": EMAIL_DOMAIN,
         "trace": trace
     })
 
 
 # ============================================================
-# DIAGNÓSTICO DE PROXY
+# DIAGNÓSTICO DEL PROXY
 # ============================================================
 
-@app.route("/diagnostico", methods=["GET"])
+@app.route("/diagnostico")
 def diagnostico():
 
-    resultado = {}
+    result = {
+        "proxy_config": {
+            "host": PROXY_HOST,
+            "user": PROXY_USER,
+            "configured": bool(PROXY_USER and PROXY_PASS)
+        },
+        "tests": {}
+    }
+
+    # --------------------------------------------------------
+    # SIN PROXY
+    # --------------------------------------------------------
 
     try:
+
         inicio = time.time()
 
-        response = session.get(
-            "https://api.ipify.org?format=json",
-            proxies=PROXIES,
-            timeout=TIMEOUT
+        r = requests.get(
+            "https://httpbin.org/ip",
+            timeout=10
         )
 
-        resultado["proxy"] = {
-            "status": response.status_code,
-            "elapsed_seconds": round(time.time() - inicio, 3),
-            "response": response.text[:500]
+        result["tests"]["sin_proxy"] = {
+            "status": "ok",
+            "status_code": r.status_code,
+            "elapsed_seconds": round(
+                time.time() - inicio,
+                3
+            ),
+            "ip": r.json().get(
+                "origin",
+                "unknown"
+            )
         }
 
     except Exception as e:
 
-        resultado["proxy"] = {
+        result["tests"]["sin_proxy"] = {
             "status": "error",
             "error": str(e)
         }
 
-    return jsonify(resultado)
+    # --------------------------------------------------------
+    # CON PROXY
+    # --------------------------------------------------------
+
+    try:
+
+        inicio = time.time()
+
+        r = c.get(
+            "https://httpbin.org/ip",
+            timeout=10
+        )
+
+        result["tests"]["con_proxy"] = {
+            "status": "ok",
+            "status_code": r.status_code,
+            "elapsed_seconds": round(
+                time.time() - inicio,
+                3
+            ),
+            "ip": r.json().get(
+                "origin",
+                "unknown"
+            )
+        }
+
+    except Exception as e:
+
+        result["tests"]["con_proxy"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # --------------------------------------------------------
+    # COMPARACIÓN
+    # --------------------------------------------------------
+
+    ip_directa = (
+        result["tests"]
+        .get("sin_proxy", {})
+        .get("ip")
+    )
+
+    ip_proxy = (
+        result["tests"]
+        .get("con_proxy", {})
+        .get("ip")
+    )
+
+    result["proxy_funcionando"] = (
+        bool(ip_directa)
+        and bool(ip_proxy)
+        and ip_directa != ip_proxy
+    )
+
+    result["conclusion"] = (
+        "Proxy funcionando"
+        if result["proxy_funcionando"]
+        else "No se pudo confirmar el proxy"
+    )
+
+    return jsonify(result)
 
 
 # ============================================================
-# DETALLE DEL PROXY
+# DIAGNÓSTICO DETALLADO DEL PROXY
 # ============================================================
 
-@app.route("/diagnostico/proxy-detalle", methods=["GET"])
+@app.route("/diagnostico/proxy-detalle")
 def diagnostico_proxy_detalle():
 
-    resultados = {}
+    tests = {}
 
-    urls = {
-        "ipify": "https://api.ipify.org?format=json",
-        "httpbin": "https://httpbin.org/ip"
-    }
+    # --------------------------------------------------------
+    # HTTPBIN
+    # --------------------------------------------------------
 
-    for nombre, url in urls.items():
+    try:
 
-        try:
+        r = c.get(
+            "https://httpbin.org/get",
+            timeout=15
+        )
 
-            inicio = time.time()
+        data = r.json()
 
-            response = session.get(
-                url,
-                proxies=PROXIES,
-                timeout=TIMEOUT
+        tests["httpbin"] = {
+            "status_code": r.status_code,
+            "origin": data.get("origin"),
+            "headers": data.get("headers", {})
+        }
+
+    except Exception as e:
+
+        tests["httpbin"] = {
+            "error": str(e)
+        }
+
+    # --------------------------------------------------------
+    # IPINFO
+    # --------------------------------------------------------
+
+    try:
+
+        r = c.get(
+            "https://ipinfo.io/json",
+            timeout=15
+        )
+
+        tests["ipinfo"] = {
+            "status_code": r.status_code,
+            "data": (
+                r.json()
+                if r.status_code == 200
+                else r.text[:500]
             )
+        }
 
-            resultados[nombre] = {
-                "status_code": response.status_code,
-                "elapsed_seconds": round(
-                    time.time() - inicio,
-                    3
-                ),
-                "response": response.text[:1000]
-            }
+    except Exception as e:
 
-        except Exception as e:
+        tests["ipinfo"] = {
+            "error": str(e)
+        }
 
-            resultados[nombre] = {
-                "status": "error",
-                "error": str(e)
-            }
+    # --------------------------------------------------------
+    # PARKINGPAY
+    # --------------------------------------------------------
 
-    return jsonify(resultados)
+    try:
+
+        inicio = time.time()
+
+        r = c.head(
+            "https://parkingpay-api-prod.azurewebsites.net",
+            timeout=10
+        )
+
+        tests["parkingpay"] = {
+            "status_code": r.status_code,
+            "elapsed_seconds": round(
+                time.time() - inicio,
+                3
+            ),
+            "server": r.headers.get("Server"),
+            "powered_by": r.headers.get("X-Powered-By")
+        }
+
+    except Exception as e:
+
+        tests["parkingpay"] = {
+            "error": str(e)
+        }
+
+    return jsonify({
+        "proxy": {
+            "host": PROXY_HOST,
+            "user": PROXY_USER,
+            "configured": bool(
+                PROXY_USER and PROXY_PASS
+            )
+        },
+        "tests": tests
+    })
 
 
 # ============================================================
 # HOME
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
 
     return jsonify({
-        "status": "online",
-        "service": "ParkingPay diagnostic",
+        "status": "ok",
+        "message": "API de diagnóstico activa",
         "email_domain": EMAIL_DOMAIN,
         "endpoints": {
-            "flujo": "POST /diagnostico/flujo",
-            "proxy": "GET /diagnostico",
-            "proxy_detalle": "GET /diagnostico/proxy-detalle"
+            "GET /diagnostico":
+                "Verificar proxy",
+            "GET /diagnostico/proxy-detalle":
+                "Diagnóstico detallado",
+            "POST /diagnostico/flujo":
+                "Probar registro y login"
         }
     })
 
 
 # ============================================================
-# MAIN
+# START
 # ============================================================
 
 if __name__ == "__main__":
 
-    port = int(os.getenv("PORT", 8080))
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
