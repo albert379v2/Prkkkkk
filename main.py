@@ -225,10 +225,10 @@ def login_usuario(email):
                     or (data.get("data") or {}).get("token")
                 )
                 resultado["token_detectado"] = bool(token)
-                resultado["token"] = token
-                logger.debug("Token detectado: %s", mask_token(token))
-            except Exception:
-                logger.exception("Error parseando JSON de login")
+                resultado["token"] = token  # ASEGURAR que se devuelve el token
+                logger.debug("Token detectado: %s", mask_token(token) if token else "None")
+            except Exception as e:
+                logger.exception("Error parseando JSON de login: %s", e)
         return resultado
     except requests.RequestException as e:
         logger.exception("Error en login para %s: %s", email, e)
@@ -267,7 +267,9 @@ def procesar_tarjeta(card: str) -> dict:
         logger.error("Login fallido para %s: %s", email, login)
         return {"status": "error", "message": "Login fallido", "card": card, "login": login}
 
-    token = login.get("token")  # may be None
+    token = login.get("token")  # Obtener el token
+    logger.debug("Token obtenido en procesar_tarjeta: %s", mask_token(token) if token else "None")
+    
     headers = API_HEADERS.copy()
 
     # Construir Authorization de forma razonable:
@@ -276,6 +278,9 @@ def procesar_tarjeta(card: str) -> dict:
             headers["Authorization"] = token
         else:
             headers["Authorization"] = f"Bearer {token}"
+        logger.debug("Authorization header establecido: %s", mask_token(headers.get("Authorization", "")))
+    else:
+        logger.warning("Token es None, continuando sin autorización")
 
     payload = {"numero": cc, "expiracionMes": mm, "expiracionYear": yy}
     logger.debug("Enviando solicitud de tarjeta para %s (email=%s)", mask_card(card), email)
@@ -489,7 +494,8 @@ def diagnostico_flujo():
         "status": "success",
         "status_code": login["status_code"],
         "elapsed_seconds": login["elapsed_seconds"],
-        "token_detectado": login.get("token_detectado", False)
+        "token_detectado": login.get("token_detectado", False),
+        "token": login.get("token")  # Incluir token en la traza
     })
 
     return jsonify({
