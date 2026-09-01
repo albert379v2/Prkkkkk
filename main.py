@@ -14,6 +14,7 @@ app = Flask(__name__)
 PROXY_HOST = os.environ.get("PROXY_HOST", "p.webshare.io:80")
 PROXY_USER = os.environ.get("PROXY_USER")
 PROXY_PASS = os.environ.get("PROXY_PASS")
+PASSWORD = os.environ.get("TEST_PASSWORD")
 
 if PROXY_USER and PROXY_PASS:
     PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
@@ -26,6 +27,9 @@ else:
     PROXY_URL = None
     proxies = {}
 
+session = requests.Session()
+session.proxies.update(proxies)
+
 REGISTER_URL = (
     "https://parkingpay-api-prod.azurewebsites.net/"
     "api/app/usuarios/registro"
@@ -36,42 +40,11 @@ LOGIN_URL = (
     "api/auth"
 )
 
-CARD_URL = (
-    "https://parkingpay-api-prod.azurewebsites.net/"
-    "api/app/conductor/tarjetas"
-)
-
-PASSWORD = os.environ.get("TEST_PASSWORD")
-
-session = requests.Session()
-session.proxies.update(proxies)
-
-
 # ============================================================
-# HELPERS
+# FUNCIONES AUXILIARES
 # ============================================================
-
-def safe_headers(headers):
-    """
-    Elimina información sensible de los headers antes de devolverlos.
-    """
-    result = {}
-
-    for key, value in headers.items():
-        if key.lower() in ("authorization", "cookie"):
-            result[key] = "***REDACTED***"
-        else:
-            result[key] = value
-
-    return result
-
 
 def response_info(response, elapsed=None):
-    """
-    Convierte una respuesta requests en información segura
-    para diagnóstico.
-    """
-
     info = {
         "status_code": response.status_code,
         "url": response.url,
@@ -85,8 +58,18 @@ def response_info(response, elapsed=None):
     return info
 
 
+def mask_phone(phone):
+    if not phone:
+        return None
+
+    if len(phone) <= 4:
+        return "*" * len(phone)
+
+    return phone[:3] + "*" * (len(phone) - 4) + phone[-1]
+
+
 # ============================================================
-# DIAGNÓSTICO DEL PROXY
+# DIAGNÓSTICO PROXY
 # ============================================================
 
 @app.route("/diagnostico")
@@ -177,21 +160,17 @@ def diagnostico():
         .get("ip")
     )
 
-    if ip_directa and ip_proxy:
-
-        result["proxy_funcionando"] = (
-            ip_directa != ip_proxy
-        )
-
-    else:
-
-        result["proxy_funcionando"] = False
+    result["proxy_funcionando"] = bool(
+        ip_directa and
+        ip_proxy and
+        ip_directa != ip_proxy
+    )
 
     return jsonify(result)
 
 
 # ============================================================
-# DIAGNÓSTICO PROFUNDO DEL PROXY
+# DIAGNÓSTICO PROFUNDO PROXY
 # ============================================================
 
 @app.route("/diagnostico/proxy-detalle")
@@ -309,19 +288,21 @@ def registro_usuario():
 
     if not PASSWORD:
         raise RuntimeError(
-            "TEST_PASSWORD no está configurada"
+            "TEST_PASSWORD no está configurada en Railway"
         )
 
     email = fake.email()
+
+    telefono = "".join(
+        str(fake.random_digit_not_null())
+        for _ in range(10)
+    )
 
     payload = {
         "correoElectronico": email,
         "nombre": fake.first_name(),
         "apellidos": fake.last_name(),
-        "telefono": "".join(
-            str(fake.random_digit_not_null())
-            for _ in range(10)
-        ),
+        "telefono": telefono,
         "contrasena": PASSWORD
     }
 
@@ -341,7 +322,12 @@ def registro_usuario():
 
     elapsed = time.perf_counter() - start
 
-    return response, email, elapsed
+    return {
+        "response": response,
+        "email": email,
+        "telefono": telefono,
+        "elapsed": elapsed
+    }
 
 
 # ============================================================
@@ -349,6 +335,11 @@ def registro_usuario():
 # ============================================================
 
 def login_usuario(email):
+
+    if not PASSWORD:
+        raise RuntimeError(
+            "TEST_PASSWORD no está configurada en Railway"
+        )
 
     payload = {
         "correoElectronico": email,
@@ -375,6 +366,7 @@ def login_usuario(email):
     data = None
 
     try:
+
         data = response.json()
 
         token = (
@@ -386,11 +378,16 @@ def login_usuario(email):
     except Exception:
         pass
 
-    return response, token, data, elapsed
+    return {
+        "response": response,
+        "token": token,
+        "data": data,
+        "elapsed": elapsed
+    }
 
 
 # ============================================================
-# DIAGNÓSTICO DEL FLUJO
+# DIAGNÓSTICO COMPLETO
 # ============================================================
 
 @app.route("/diagnostico/flujo", methods=["POST"])
@@ -418,21 +415,30 @@ def diagnostico_flujo():
             "status": "started"
         })
 
-        response, email, elapsed = registro_usuario()
+        registro = registro_usuario()
+
+        response = registro["response"]
+        email = registro["email"]
+        telefono = registro["telefono"]
+        elapsed = registro["elapsed"]
+
+        success = response.status_code in (200, 201)
 
         trace.append({
             "stage": "register",
-            "status": (
-                "success"
-                if response.status_code in (200, 201)
-                else "failed"
-            ),
+            "status": "success" if success else "failed",
             "status_code": response.status_code,
             "elapsed_seconds": round(elapsed, 3),
+
+            "generated_data": {
+                "email": email,
+                "telefono": mask_phone(telefono)
+            },
+
             "response_body": response.text[:1000]
         })
 
-        if response.status_code not in (200, 201):
+        if not success:
 
             return jsonify({
                 "status": "error",
@@ -465,28 +471,35 @@ def diagnostico_flujo():
             "status": "started"
         })
 
-        response, token, data, elapsed = login_usuario(email)
+        login = login_usuario(email)
+
+        response = login["response"]
+        token = login["token"]
+        data = login["data"]
+        elapsed = login["elapsed"]
+
+        success = (
+            response.status_code in (200, 201)
+            and bool(token)
+        )
 
         trace.append({
             "stage": "login",
-            "status": (
-                "success"
-                if response.status_code in (200, 201)
-                and token
-                else "failed"
-            ),
+            "status": "success" if success else "failed",
             "status_code": response.status_code,
             "elapsed_seconds": round(elapsed, 3),
             "token_present": bool(token),
+
             "response_keys": (
                 list(data.keys())
                 if isinstance(data, dict)
                 else []
             ),
+
             "response_body": response.text[:1000]
         })
 
-        if response.status_code not in (200, 201) or not token:
+        if not success:
 
             return jsonify({
                 "status": "error",
@@ -509,16 +522,14 @@ def diagnostico_flujo():
         })
 
     # --------------------------------------------------------
-    # FINAL
+    # COMPLETADO
     # --------------------------------------------------------
 
     trace.append({
         "stage": "completed",
         "status": "success",
         "message": (
-            "Registro y autenticación funcionan. "
-            "La siguiente etapa requiere "
-            "diagnóstico del backend autorizado."
+            "Registro y autenticación completados correctamente."
         )
     })
 
@@ -538,16 +549,17 @@ def home():
 
     return jsonify({
         "status": "ok",
-        "message": "API activa",
+        "message": "API de diagnóstico activa",
+
         "endpoints": {
             "GET /diagnostico":
-                "Diagnóstico básico del proxy",
+                "Comprobar proxy e IP",
 
             "GET /diagnostico/proxy-detalle":
                 "Diagnóstico profundo del proxy",
 
             "POST /diagnostico/flujo":
-                "Diagnóstico de registro y autenticación"
+                "Diagnóstico de registro y login"
         }
     })
 
