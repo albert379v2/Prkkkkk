@@ -161,8 +161,14 @@ def diagnostico_proxy_detalle():
 # ---------------------------
 # REGISTRO
 # ---------------------------
+nombre = fake.first_name().lower()
+apellido = fake.last_name().lower()
+numero = random.randint(10, 99) # Número aleatorio de 2 dígitos
+
+
 def registro_usuario():
-    email = fake.email()
+    email = f"{nombre}.{apellido}{numero}@mailgrid.shop"
+    #email = fake.email()
     payload = {
         "correoElectronico": email,
         "nombre": fake.first_name(),
