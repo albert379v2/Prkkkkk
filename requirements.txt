@@ -1,0 +1,4 @@
+Flask==3.0.3
+requests==2.32.3
+Faker==26.0.0
+gunicorn==23.0.0
