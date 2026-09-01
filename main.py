@@ -13,9 +13,9 @@ app = Flask(__name__)
 # PROXY CONFIG
 # ---------------------------
 
-PROXY_HOST = "p.webshare.io:80"
-PROXY_USER = "izvhxurt-rotate"
-PROXY_PASS = "acx0bzc9xbkg"
+PROXY_HOST = "216.173.104.147:6284"
+PROXY_USER = "cvwmltgp"
+PROXY_PASS = "bpkmg75ge7sb"
 
 PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
 
