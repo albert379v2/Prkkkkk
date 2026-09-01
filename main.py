@@ -30,6 +30,134 @@ CARD_URL = "https://parkingpay-api-prod.azurewebsites.net/api/app/conductor/tarj
 PASSWORD = "Tumama19012!"
 
 
+# ===========================
+# DIAGNÓSTICO PROXY
+# ===========================
+
+@app.route('/diagnostico')
+def diagnostico():
+    """
+    Verifica si el proxy está funcionando comparando IP con y sin proxy
+    """
+    result = {
+        "proxy_config": {
+            "host": PROXY_HOST,
+            "user": PROXY_USER,
+            "url_masked": f"http://{PROXY_USER}:****@{PROXY_HOST}"
+        },
+        "session_proxies": dict(c.proxies),
+        "tests": {}
+    }
+
+    # Test 1: IP sin proxy (requests directo)
+    try:
+        r_no_proxy = requests.get("https://httpbin.org/ip", timeout=10)
+        result["tests"]["sin_proxy"] = {
+            "status": "ok",
+            "ip": r_no_proxy.json().get("origin", "unknown")
+        }
+    except Exception as e:
+        result["tests"]["sin_proxy"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # Test 2: IP con proxy (sesión c)
+    try:
+        r_con_proxy = c.get("https://httpbin.org/ip", timeout=10)
+        result["tests"]["con_proxy"] = {
+            "status": "ok",
+            "ip": r_con_proxy.json().get("origin", "unknown"),
+            "status_code": r_con_proxy.status_code
+        }
+    except Exception as e:
+        result["tests"]["con_proxy"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # Test 3: IP con proxy explícito en requests.get
+    try:
+        r_explicit = requests.get(
+            "https://httpbin.org/ip",
+            proxies=proxies,
+            timeout=10
+        )
+        result["tests"]["proxy_explicito"] = {
+            "status": "ok",
+            "ip": r_explicit.json().get("origin", "unknown")
+        }
+    except Exception as e:
+        result["tests"]["proxy_explicito"] = {
+            "status": "error",
+            "error": str(e)
+        }
+
+    # Comparación
+    sin_proxy_ip = result["tests"].get("sin_proxy", {}).get("ip", "")
+    con_proxy_ip = result["tests"].get("con_proxy", {}).get("ip", "")
+
+    result["proxy_funcionando"] = (
+        sin_proxy_ip != "" and
+        con_proxy_ip != "" and
+        sin_proxy_ip != con_proxy_ip
+    )
+
+    result["conclusion"] = (
+        "✅ Proxy FUNCIONA - IPs son diferentes"
+        if result["proxy_funcionando"]
+        else "❌ Proxy NO FUNCIONA - IPs son iguales o hay error"
+    )
+
+    return jsonify(result)
+
+
+@app.route('/diagnostico/proxy-detalle')
+def diagnostico_proxy_detalle():
+    """
+    Test más profundo del proxy con múltiples servicios
+    """
+    tests = {}
+
+    # Test con httpbin.org
+    try:
+        r = c.get("https://httpbin.org/get", timeout=15)
+        data = r.json()
+        tests["httpbin_headers"] = {
+            "status_code": r.status_code,
+            "origin": data.get("origin"),
+            "headers_sent": data.get("headers", {})
+        }
+    except Exception as e:
+        tests["httpbin_headers"] = {"error": str(e)}
+
+    # Test con ipinfo.io
+    try:
+        r = c.get("https://ipinfo.io/json", timeout=15)
+        tests["ipinfo"] = {
+            "status_code": r.status_code,
+            "data": r.json() if r.status_code == 200 else r.text[:500]
+        }
+    except Exception as e:
+        tests["ipinfo"] = {"error": str(e)}
+
+    # Test proxy a ParkingPay (solo HEAD para ver si responde)
+    try:
+        r = c.head("https://parkingpay-api-prod.azurewebsites.net", timeout=10)
+        tests["parkingpay_head"] = {
+            "status_code": r.status_code,
+            "headers": dict(r.headers)
+        }
+    except Exception as e:
+        tests["parkingpay_head"] = {"error": str(e)}
+
+    return jsonify({
+        "proxy_url": f"http://{PROXY_USER}:****@{PROXY_HOST}",
+        "session_proxies": dict(c.proxies),
+        "tests": tests
+    })
+
+
 # ---------------------------
 # REGISTRO
 # ---------------------------
@@ -113,9 +241,6 @@ def procesar_tarjeta(card: str, route=None) -> dict:
     try:
         r = c.post(CARD_URL, json=payload, headers=headers, timeout=30)
 
-        # ============================================================
-        # RAW RESPONSE COMPLETO DE PARKINGPAY (para debug)
-        # ============================================================
         raw_response = {
             "status_code": r.status_code,
             "headers": dict(r.headers),
@@ -127,7 +252,6 @@ def procesar_tarjeta(card: str, route=None) -> dict:
 
         source = r.text.lower()
 
-        # ✅ LIVE
         if r.status_code == 200:
             return {
                 "status": "live",
@@ -136,7 +260,6 @@ def procesar_tarjeta(card: str, route=None) -> dict:
                 "raw": raw_response
             }
 
-        # ❌ DEAD (Stripe / error servidor)
         if r.status_code == 500 or "stripe" in source:
             return {
                 "status": "dead",
@@ -145,7 +268,6 @@ def procesar_tarjeta(card: str, route=None) -> dict:
                 "raw": raw_response
             }
 
-        # ⚠️ CUALQUIER OTRO ERROR (incluyendo 400)
         return {
             "status": "error",
             "message": f"Gateway error {r.status_code}",
@@ -171,7 +293,12 @@ def home():
     return jsonify({
         "status": "ok",
         "message": "API activa",
-        "endpoints": {"POST /check": "Verificar una tarjeta", "POST /check/bulk": "Verificar múltiples tarjetas"}
+        "endpoints": {
+            "GET /diagnostico": "Verificar si proxy funciona",
+            "GET /diagnostico/proxy-detalle": "Diagnóstico profundo del proxy",
+            "POST /check": "Verificar una tarjeta",
+            "POST /check/bulk": "Verificar múltiples tarjetas"
+        }
     })
 
 
@@ -203,4 +330,3 @@ def check_bulk():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-  
