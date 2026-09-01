@@ -12,8 +12,8 @@ app = Flask(__name__)
 # ============================================================
 
 PROXY_HOST = os.environ.get("PROXY_HOST", "p.webshare.io:80")
-PROXY_USER = os.environ.get("cvwmltgp")
-PROXY_PASS = os.environ.get("bpkmg75ge7sb")
+PROXY_USER = os.environ.get("PROXY_USER")
+PROXY_PASS = os.environ.get("PROXY_PASS")
 
 if PROXY_USER and PROXY_PASS:
     PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}"
@@ -565,4 +565,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-)
+    )
